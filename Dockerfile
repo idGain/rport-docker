@@ -15,43 +15,34 @@ RUN wget -q https://downloads.rport.io/frontend/stable/rport-frontend-stable-${f
 RUN wget https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.zip -O novnc.zip \
     && unzip novnc.zip && mv noVNC-${NOVNC_VERSION} ./novnc
 
-FROM guacamole/guacd:latest
+WORKDIR /envplate
+RUN set -e \
+    && arch=$(uname -m) \
+    && if [ "${arch}" == "aarch64" ]; then release_arch="arm64"; else release_arch=${arch}; fi \
+    && release_name=envplate_1.0.2_$(uname -s)_${release_arch}.tar.gz \
+    && wget https://github.com/kreuzwerker/envplate/releases/download/v1.0.2/${release_name} -O envplate.tar.gz \
+    && tar -xf envplate.tar.gz
 
-USER root
-
-ARG TZ="UTC"
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
-    echo $TZ > /etc/timezone
-
-RUN export DEBIAN_FRONTEND=noninteractive && apt update && apt install -y --no-install-recommends wget fail2ban iptables supervisor
+FROM debian:11
 
 COPY --from=downloader /app/rportd /usr/local/bin/rportd
 COPY --from=downloader /app/frontend/ /var/www/html/
 COPY --from=downloader /app/novnc/ /var/lib/rport-novnc
-COPY supervisord.conf /etc/supervisor/supervisord.conf
+COPY --from=downloader /envplate/envplate /usr/local/bin/ep
 
-RUN useradd -d /var/lib/rport -m -U -r -s /bin/false rport
+COPY entrypoint.sh /entrypoint.sh
 
-RUN touch /var/lib/rport/rport.log && chown rport /var/lib/rport/rport.log
-
-COPY jail.conf /etc/fail2ban/
-COPY defaults-debian.conf  /etc/fail2ban/jail.d
-COPY rportd-client-connect.conf /etc/fail2ban/filter.d/
-
-RUN service fail2ban restart
-
-RUN apt-get remove --purge -y --allow-remove-essential apt && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+RUN set -e \
+    && useradd -d /var/lib/rport -m -U -r -s /bin/false rport \
+    && mkdir -p /etc/rport && chown rport:rport /etc/rport
 
 USER rport
+
+COPY --chown=rport:rport rportd.conf.template /etc/rport/rportd.conf.template
 
 VOLUME [ "/var/lib/rport/" ]
 
 EXPOSE 8080
 EXPOSE 3000
-EXPOSE 20000-30000
-EXPOSE 4822
 
-CMD ["/usr/bin/supervisord"]
-
-HEALTHCHECK --interval=30s --timeout=5s\
-    CMD wget --no-check-certificate --spider -S https://localhost:3000 2>&1 > /dev/null | grep -q "200 OK$"
+ENTRYPOINT [ "/bin/bash", "/entrypoint.sh", "/usr/local/bin/rportd", "--data-dir", "/var/lib/rport", "--config", "/etc/rport/rportd.conf" ]
